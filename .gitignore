@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Data & Models (Too big for Git, we track code only!)
+data/
+*.pkl
+*.keras
+*.h5
+*.xlsx
+*.csv
+
+# IDE
+.vscode/
+.idea/
+
+# Environment variables (Safety!)
+.env
+
+
+wallet.json
