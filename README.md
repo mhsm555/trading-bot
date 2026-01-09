@@ -1,4 +1,5 @@
 🤖 Quantitative AI Trading System (Bitcoin)
+
 A full-stack algorithmic trading platform designed for high-frequency Bitcoin analysis and automated execution. This system utilizes a Multi-Model Ensemble approach—combining Deep Learning with Gradient Boosting—to predict price direction with high confidence.
 
 The platform features a modular execution engine capable of switching between Spot and Futures (Leverage) trading modes, visualized in real-time via a React WebSocket dashboard.
@@ -34,7 +35,7 @@ DevOps Ready: Fully containerized with Docker and CI/CD pipelines via GitHub Act
 📊 Performance (2023-2026 Backtest)
 Backtest results on hourly (1h) Bitcoin data:
 
-![performane_spot](asset/img1.png)
+![performane_spot](assets/img1.png)
 
 🛠️ Tech Stack
 Quantitative Core
