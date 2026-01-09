@@ -1,5 +1,5 @@
 import pytest
-from src.strategy import calculate_position_size
+from src.money_management import calculate_position_size
 
 def test_position_sizing_logic():
     balance = 10000
