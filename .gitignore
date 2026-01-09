@@ -18,6 +18,4 @@ data/
 
 # Environment variables (Safety!)
 .env
-
-
 wallet.json

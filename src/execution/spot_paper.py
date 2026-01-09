@@ -1,14 +1,18 @@
 import json
 import os
 from datetime import datetime
+from src.execution.base_trader import BaseTrader
 
-class PaperTrader:
-    def __init__(self, starting_balance=10000, wallet_file='wallet.json'):
-        self.wallet_file = wallet_file
-        self.starting_balance = starting_balance
+class SpotPaperTrader(BaseTrader):
+    def __init__(self, initial_balance=10000, wallet_file='spot_wallet.json'):
+        # Initialize the Parent (BaseTrader)
+        super().__init__(initial_balance, wallet_file)
         
-        # Load existing wallet or create a new one
-        self.state = self._load_wallet()
+        # Set specific Spot variables if not in state
+        if 'btc_balance' not in self.state:
+            self.state['btc_balance'] = 0.0
+            self.state['usd_balance'] = initial_balance
+            self.state['in_position'] = False
 
     def _load_wallet(self):
         if os.path.exists(self.wallet_file):

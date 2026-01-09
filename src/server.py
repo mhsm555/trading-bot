@@ -5,11 +5,11 @@ import json
 from src.market_data import MarketDataHandler
 from src.features import FeatureEngineer
 from src.ai_model import CryptoModel
-from src.paper_trader import PaperTrader
+from src.execution.spot_paper import SpotPaperTrader
+from src.execution.futures_paper import FuturesPaperTrader 
 
 app = FastAPI()
 
-# Allow the React frontend to talk to this server
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000"],
@@ -17,37 +17,48 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ... inside src/server.py ...
+# --- CONFIG ---
+TRADING_MODE = 'FUTURES'  # 'SPOT' or 'FUTURES'
+LEVERAGE = 5
+
+# --- INITIALIZE WALLET ---
+# 1. FIXED: Removed the accidental overwrite
+if TRADING_MODE == 'SPOT':
+    print("🔹 Running in SPOT Mode")
+    wallet = SpotPaperTrader(initial_balance=10000)
+elif TRADING_MODE == 'FUTURES':
+    print(f"🚀 Running in FUTURES Mode ({LEVERAGE}x)")
+    wallet = FuturesPaperTrader(initial_balance=10000, leverage=LEVERAGE)
 
 # Global State
 bot_active = False
-current_timeframe = "1h"
-wallet = PaperTrader()
-
-# Initialize Brain
 bot_brain = CryptoModel(model_type='ensemble')
+
 try:
-    bot_brain.load_model("model_ensemble") # <--- Automatically looks in data/model_ensemble.pkl
+    bot_brain.load_model("model_ensemble") 
     print("✅ Server: Brain Loaded.")
 except Exception as e:
     print(f"❌ Server: Brain missing! {e}")
 
 @app.get("/status")
 def get_status():
-    """Returns wallet balance and bot status."""
+    # 2. FIXED: Handle different method names for Equity
+    if TRADING_MODE == 'FUTURES':
+        # Futures wallet needs current price (approx 0 is dangerous, but acceptable for static check if no positions)
+        equity = wallet.get_equity(0) 
+    else:
+        equity = wallet.get_total_equity(0)
+
     return {
         "active": bot_active,
-        "balance": wallet.get_total_equity(0), # Pass 0 if we just want raw balance
-        "history": wallet.state['history']
+        "balance": equity,
+        "history": wallet.trades # Note: Ensure both classes use 'trades' list
     }
 
 @app.get("/history/{timeframe}")
 async def get_history(timeframe: str):
-    """Fetches historical candles for the chart initialization."""
     handler = MarketDataHandler('binance', 'BTC/USDT', timeframe)
     df = handler.fetch_data(limit=1000)
-    
-    # Format for Lightweight Charts (time must be UNIX timestamp in seconds)
     candles = []
     for _, row in df.iterrows():
         candles.append({
@@ -71,46 +82,62 @@ def stop_bot():
     bot_active = False
     return {"message": "Bot Stopped"}
 
-# In src/server.py
-
 @app.websocket("/ws/{timeframe}")
 async def websocket_endpoint(websocket: WebSocket, timeframe: str):
     await websocket.accept()
     
-    # 1. Handler for the CHART (Dynamic)
     chart_handler = MarketDataHandler('binance', 'BTC/USDT', timeframe=timeframe)
-    
-    # 2. Handler for the BOT (Always 1h)
     bot_handler = MarketDataHandler('binance', 'BTC/USDT', timeframe="1h")
     
     try:
         while True:
-            # --- A. FETCH CHART DATA (What you see) ---
+            # A. FETCH DATA
             chart_df = chart_handler.fetch_data(limit=1)
             latest_chart = chart_df.iloc[-1]
+            current_price = latest_chart['close']
             
-            # --- B. FETCH BOT DATA (What the AI needs) ---
-            # We fetch this SEPARATELY so the bot is never confused by 15m/4h data
             bot_df = bot_handler.fetch_data(limit=50)
             
-            # --- C. RUN BOT LOGIC (Always on 1h data) ---
+            # B. RUN AI
             decision = 0
             confidence = 0.0
             
             if bot_active:
-                # 1. Engineer Features on the 1h data
                 engineer = FeatureEngineer(bot_df)
                 processed_bot_df = engineer.add_indicators()
                 
-                # 2. Ask the Brain
+                # predict_signal returns (decision, confidence)
+                # decision 1 = Buy, decision 0 = Wait
                 decision, confidence = bot_brain.predict_signal(processed_bot_df, threshold=0.6)
                 
-                # 3. Execute Trade (using the CURRENT price, which is fine)
-                # Note: We use the chart's current close price for execution simulation
-                # so it matches what you see on screen.
-                wallet.execute_strategy(decision, latest_chart['close'], latest_chart['timestamp'])
+                # --- C. EXECUTION LOGIC (The smart part) ---
+                if TRADING_MODE == 'SPOT':
+                    # Standard Spot Execution
+                    wallet.execute_strategy(decision, current_price, latest_chart['timestamp'])
+                
+                elif TRADING_MODE == 'FUTURES':
+                    # 3. FIXED: Custom Futures Logic (Long AND Short)
+                    # Logic: 
+                    # High Conf (> 0.60) -> LONG
+                    # Low Conf (< 0.40) -> SHORT
+                    # Middle -> Close positions or Wait
+                    
+                    if confidence >= 0.60:
+                        wallet.open_position('LONG', current_price, amount_usd=1000)
+                    elif confidence <= 0.40:
+                        wallet.open_position('SHORT', current_price, amount_usd=1000)
+                    else:
+                        # Optional: Close positions if confidence is weak
+                        # wallet.close_position(current_price)
+                        pass
 
-            # --- D. SEND PAYLOAD ---
+            # D. REPORTING
+            # Get equity based on mode
+            if TRADING_MODE == 'FUTURES':
+                current_equity = wallet.get_equity(current_price)
+            else:
+                current_equity = wallet.get_total_equity(current_price)
+
             payload = {
                 "candle": {
                     "time": int(latest_chart['timestamp'].timestamp()),
@@ -121,9 +148,9 @@ async def websocket_endpoint(websocket: WebSocket, timeframe: str):
                 },
                 "bot": {
                     "is_active": bot_active,
-                    "decision": "BUY" if decision == 1 else "WAIT",
+                    "decision": "LONG" if confidence > 0.6 else ("SHORT" if confidence < 0.4 else "WAIT"),
                     "confidence": float(confidence),
-                    "equity": wallet.get_total_equity(latest_chart['close'])
+                    "equity": current_equity
                 }
             }
             
@@ -132,3 +159,5 @@ async def websocket_endpoint(websocket: WebSocket, timeframe: str):
             
     except Exception as e:
         print(f"WS Error: {e}")
+        import traceback
+        traceback.print_exc() # Helps you see why it crashed
