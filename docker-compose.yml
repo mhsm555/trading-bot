@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  # --- 1. THE PYTHON BOT ---
+  tradingbot_btc:
+    container_name: tradingbot_btc_container
+    build:
+      context: .                  # Root folder
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./assets:/app/assets      # Keep assets for logs/backups
+    depends_on:
+      - db                        # Wait for DB to start before running bot
+    environment:
+      - PYTHONUNBUFFERED=1
+      # Connection string for the bot to find the DB
+      - DATABASE_URL=postgresql://user:password@db:5432/tradingbot
+
+  # --- 2. THE DATABASE (PostgreSQL) ---
+  db:
+    image: postgres:15
+    container_name: tradingbot_db
+    restart: always
+    environment:
+      # These specific names setup the DB user/pass on first launch
+      - POSTGRES_USER=user
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=tradingbot
+    volumes:
+      # This saves your data even if you delete the container
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"               # Optional: Allows you to view DB via DBeaver on PC
+
+volumes:
+  postgres_data:

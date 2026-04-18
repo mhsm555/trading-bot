@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🤖 Quantitative AI Trading System (Bitcoin)
+# 🤖 Quantitative AI Trading System 
 
 [![Python](https://img.shields.io/badge/Python-3.10-3776AB?style=flat&logo=python&logoColor=white)](https://www.python.org/)
 [![Framework](https://img.shields.io/badge/AI-TensorFlow%20%7C%20XGBoost-FF6F00?style=flat&logo=tensorflow&logoColor=white)](https://www.tensorflow.org/)
@@ -21,7 +21,7 @@
 
 ## 🧠 AI Architecture: The "Ensemble 5"
 
-Instead of relying on a single algorithm, this bot aggregates predictions from **5 distinct models** to filter out noise and reduce false positives.
+Instead of relying on a single algorithm, this bot utilizes a **Regime-Aware Meta-Learner** to aggregate predictions from 5 distinct models, adjusting weights based on market volatility.
 
 | Model | Type | Function |
 | :--- | :--- | :--- |
@@ -29,7 +29,7 @@ Instead of relying on a single algorithm, this bot aggregates predictions from *
 | **XGBoost** | Gradient Boosting | Captures non-linear relationships in market data. |
 | **LightGBM** | Gradient Boosting | High-efficiency model focusing on speed and accuracy. |
 | **Random Forest** | Decision Trees | Reduces overfitting and improves generalization. |
-| **Voting Ensemble** | Meta-Learner | Aggregates weighted votes from all models for the final decision. |
+| **Stacking Regressor** | Meta-Learner | Dynamically weights model outputs based on current market regime. |
 
 ---
 
@@ -38,6 +38,7 @@ Instead of relying on a single algorithm, this bot aggregates predictions from *
 ### ⚙️ Dual-Mode Execution Engine
 * **Spot Mode:** Traditional accumulation strategy (Buy & Hold).
 * **Futures Mode:** Leverage-ready engine with Shorting capabilities and Margin management.
+* **Risk Engine:** Integrated Kelly Criterion and ATR-based position sizing.
 
 ### 📊 Advanced Analytics
 * **Real-Time Engineering:** Live calculation of MACD, RSI, Bollinger Bands, ATR (Volatility), and OBV Slope.

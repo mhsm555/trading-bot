@@ -1,97 +1,100 @@
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from src.execution.base_trader import BaseTrader
+from src.database import get_session, init_db
+from src.models import Trade
 
 class SpotPaperTrader(BaseTrader):
     def __init__(self, initial_balance=10000, wallet_file='spot_wallet.json'):
-        # Initialize the Parent (BaseTrader)
+        # Initialize the Parent
         super().__init__(initial_balance, wallet_file)
         
-        # Set specific Spot variables if not in state
+        # Initialize DB
+        init_db()
+        
+        # Set specific Spot variables
         if 'btc_balance' not in self.state:
             self.state['btc_balance'] = 0.0
             self.state['usd_balance'] = initial_balance
             self.state['in_position'] = False
+            self.state['entry_price'] = 0.0
 
-    def _load_wallet(self):
-        if os.path.exists(self.wallet_file):
-            with open(self.wallet_file, 'r') as f:
-                return json.load(f)
-        else:
-            # Fresh Start
-            return {
-                "usd_balance": self.starting_balance,
-                "btc_balance": 0.0,
-                "history": [],
-                "in_position": False,
-                "entry_price": 0.0
-            }
+    def get_total_equity(self, current_price):
+        usd = self.state['usd_balance']
+        btc_value = self.state['btc_balance'] * current_price
+        return usd + btc_value
 
-    def _save_wallet(self):
-        with open(self.wallet_file, 'w') as f:
-            json.dump(self.state, f, indent=4)
-
-    def execute_strategy(self, decision, current_price, timestamp):
+    # ⚡ NEW: VISUALIZE SPOT TRADES IN HUD
+    def get_open_positions(self):
         """
-        decision: 1 (Buy Signal) or 0 (Wait/Sell Signal)
+        Constructs a 'Virtual Position' so the HUD can display 
+        your Spot holding just like a Futures position.
         """
+        if self.state['in_position'] and self.state['btc_balance'] > 0:
+            # We don't have real-time price here, so PnL is calculated 
+            # by the Engine loop when it calls this, or estimated here.
+            # For simplicity, we return the static data.
+            return [{
+                'symbol': 'BTC/USDT',
+                'side': 'SPOT_LONG',
+                'entry_price': self.state['entry_price'],
+                'size': self.state['btc_balance'],
+                # PnL will be calculated dynamically by the Engine if needed, 
+                # or we can leave it 0 here.
+                'unrealizedProfit': 0.0 
+            }]
+        return []
+
+    def execute_strategy(self, decision, current_price, timestamp, size):
         usd = self.state['usd_balance']
         btc = self.state['btc_balance']
         
-        # LOGIC:
-        # If Signal is BUY (1) AND we have USD -> BUY BTC
-        # If Signal is WAIT (0) AND we have BTC -> SELL BTC (Take Profit/Stop Loss)
-        
         # --- BUY LOGIC ---
         if decision == 1 and not self.state['in_position']:
-            # Buy as much as possible
-            amount_to_buy = usd / current_price
+            cost_usd = size * current_price
             
-            # Fee (0.1% simulation)
-            fee = usd * 0.001
-            amount_to_buy = (usd - fee) / current_price
+            # Check funds
+            if cost_usd > usd:
+                print(f"⚠️ Insufficient funds. Adjusting size...")
+                size = (usd * 0.99) / current_price 
+                cost_usd = size * current_price
+
+            fee = cost_usd * 0.001 # 0.1% Spot Fee
             
-            self.state['btc_balance'] = amount_to_buy
-            self.state['usd_balance'] = 0.0
+            self.state['btc_balance'] = size
+            self.state['usd_balance'] -= (cost_usd + fee)
             self.state['in_position'] = True
             self.state['entry_price'] = current_price
             
-            self._log_trade("BUY", current_price, amount_to_buy, timestamp)
-            print(f"💰 PAPER TRADE: BOUGHT {amount_to_buy:.5f} BTC at ${current_price}")
+            self._log_trade("BUY", current_price, size, timestamp, -fee)
+            print(f"💰 SPOT BUY: {size:.4f} BTC at ${current_price:.2f}")
             
         # --- SELL LOGIC ---
         elif decision == 0 and self.state['in_position']:
-            # We treat 'Wait' as an exit signal (The trend is over)
-            
-            # Calculate value
             gross_value = btc * current_price
-            fee = gross_value * 0.001 # 0.1% fee
+            fee = gross_value * 0.001
             net_usd = gross_value - fee
             
-            # Calculate Profit/Loss
-            pnl = net_usd - (btc * self.state['entry_price'])
+            # PnL calc
+            cost_basis = btc * self.state['entry_price']
+            pnl = net_usd - cost_basis
             
-            self.state['usd_balance'] = net_usd
+            self.state['usd_balance'] += net_usd
             self.state['btc_balance'] = 0.0
             self.state['in_position'] = False
             self.state['entry_price'] = 0.0
             
             self._log_trade("SELL", current_price, btc, timestamp, pnl)
             
-            color = "🟢" if pnl > 0 else "🔴"
-            print(f"{color} PAPER TRADE: SOLD at ${current_price}. PnL: ${pnl:.2f}")
+            color = "\033[92m" if pnl > 0 else "\033[91m"
+            reset = "\033[0m"
+            print(f"{color}💰 SPOT SELL at ${current_price:.2f} | PnL: ${pnl:.2f}{reset}")
 
-        else:
-            # Hold
-            if self.state['in_position']:
-                print(f"✋ HOLDING BTC (Entry: ${self.state['entry_price']})")
-            else:
-                print(f"💤 WAITING in USD (Balance: ${usd:.2f})")
-                
         self._save_wallet()
 
     def _log_trade(self, action, price, amount, time, pnl=0):
+        # 1. JSON History
         record = {
             "time": str(time),
             "action": action,
@@ -100,9 +103,28 @@ class SpotPaperTrader(BaseTrader):
             "pnl": pnl,
             "total_equity": self.get_total_equity(price)
         }
+        if 'history' not in self.state: self.state['history'] = []
         self.state['history'].append(record)
 
-    def get_total_equity(self, current_price):
-        usd = self.state['usd_balance']
-        btc_value = self.state['btc_balance'] * current_price
-        return usd + btc_value
+        # 2. ⚡ DATABASE SYNC (Matches Futures Trader)
+        try:
+            status = "CLOSED" if action == "SELL" else "OPEN"
+            side = "LONG" # Spot is always Long
+
+            new_trade = Trade(
+                symbol="BTC/USDT",
+                side=side,
+                size=amount,
+                entry_price=price,
+                pnl=pnl if status == "CLOSED" else 0.0,
+                status=status,
+                strategy="SPOT",
+                timestamp=datetime.now(timezone.utc)
+            )
+
+            with get_session() as session:
+                session.add(new_trade)
+                session.commit()
+                
+        except Exception as e:
+            print(f"⚠️ DB Save Error: {e}")

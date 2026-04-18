@@ -3,28 +3,41 @@ import matplotlib.pyplot as plt
 import os
 import argparse
 import numpy as np
-from src.ai_model import CryptoModel
+import sys
 
-# --- CONFIGURATION ---
+# Ensure we can find 'src'
+sys.path.append(os.getcwd())
+try:
+    from src.ai_model import CryptoModel
+except ImportError:
+    print("❌ Critical Error: Could not import src.ai_model.")
+    sys.exit(1)
+
+# --- ⚙️ FUTURES CONFIGURATION ---
 INITIAL_CAPITAL = 10000
-TRADING_FEE = 0.001  # 0.1% fee
-BUY_THRESHOLD = 0.60  # Buy if AI is 60% sure
-SELL_THRESHOLD = 0.50 # Sell if AI drops below 50%
+TRADING_FEE = 0.0004     # 0.04% Futures Fee
+STOP_LOSS_PCT = 0.02     # 2% Hard Stop Loss
+TAKE_PROFIT_PCT = 0.04   # 4% Take Profit (Optional, can set to None)
 
-def run_backtest(model_name):
+# AI THRESHOLDS
+LONG_THRESHOLD = 0.60    # Buy if > 60%
+SHORT_THRESHOLD = 0.40   # Short if < 40%
+EXIT_LONG_THRESHOLD = 0.50  # Exit Long if drops below 50%
+EXIT_SHORT_THRESHOLD = 0.50 # Exit Short if rises above 50%
+
+def run_backtest(model_name, trend_bias):
     print(f"\n==========================================")
-    print(f"🔙 STARTING BACKTEST: {model_name}")
+    print(f"🔙 STARTING FUTURES BACKTEST")
+    print(f"🤖 Model: {model_name}")
+    print(f"🌊 Trend Bias: {trend_bias}")
     print(f"==========================================")
     
     # 1. Load Model
-    # Initialize with a dummy type; load_model will fix it based on metadata.
-    if 'lstm' in model_name:
-        init_type = 'lstm'
-    else:
-        init_type = 'ensemble' 
+    if 'lstm' in model_name: init_type = 'lstm'
+    elif 'xgb' in model_name: init_type = 'xgb'
+    else: init_type = 'ensemble'
         
     bot = CryptoModel(model_type=init_type)
-    
     try:
         bot.load_model(model_name)
     except Exception as e:
@@ -32,136 +45,171 @@ def run_backtest(model_name):
         return
 
     # 2. Load Data
-    file_path = 'data/btc_hourly_2020_2026_processed.xlsx'
+    if '1h' in model_name: tf = '1h'
+    elif '15m' in model_name: tf = '15m'
+    elif '5m' in model_name: tf = '5m'
+    elif '1m' in model_name: tf = '1m'
+    else: tf = '1h'
+
+    file_path = f'data/btc_{tf}_processed.csv'
     if not os.path.exists(file_path):
-        print("❌ Data file not found.")
+        print(f"❌ Data file not found: {file_path}")
         return
         
-    df = pd.read_excel(file_path)
+    df = pd.read_csv(file_path)
+    test_start_date = '2024-01-01' 
+    test_df = df[df['timestamp'] >= test_start_date].copy().reset_index(drop=True)
     
-    # Filter for the "Test" period (e.g., 2023-2026)
-    test_df = df[df['timestamp'] >= '2023-01-01'].copy().reset_index(drop=True)
-    
-    print(f"📊 Testing on {len(test_df)} hours (from 2023-01-01)...")
+    print(f"📊 Testing on {len(test_df)} candles (from {test_start_date})...")
     
     # 3. Generate Predictions
     print("🧠 Generating AI predictions...")
-    
-    probs = []
-    
-    # --- LOGIC FOR LSTM (Deep Learning) ---
+    try:
+        feature_data = test_df[bot.features]
+        scaled_features = bot.scaler.transform(feature_data)
+    except Exception:
+        print("❌ Scaling Error. Retrain model.")
+        return
+
     if bot.model_type == 'lstm':
-        print("⚙️  Mode: Deep Learning (Sequences)")
-        # Scale data
-        scaled_data = bot.scaler.transform(test_df[bot.features])
-        
-        # Create Sequences
         lookback = bot.lookback
         X_test = []
-        for i in range(lookback, len(scaled_data)):
-            X_test.append(scaled_data[i-lookback:i])
+        for i in range(lookback, len(scaled_features)):
+            X_test.append(scaled_features[i-lookback:i])
         X_test = np.array(X_test)
-        
-        # Predict
-        raw_predictions = bot.model.predict(X_test, verbose=0).flatten()
-        
-        # Pad the beginning (since we can't predict the first few rows)
-        padding = np.zeros(lookback)
-        probs = np.concatenate([padding, raw_predictions])
-        
-    # --- LOGIC FOR ML (XGB, RF, Ensemble) ---
+        if len(X_test) > 0:
+            raw = bot.model.predict(X_test, verbose=0).flatten()
+            probs = np.concatenate([np.zeros(lookback), raw])
+        else: return
     else:
-        print(f"⚙️  Mode: Machine Learning ({bot.model_type.upper()})")
-        features = test_df[bot.features]
-        # predict_proba returns [prob_loss, prob_win]. We want column 1.
-        probs = bot.model.predict_proba(features)[:, 1]
+        probs = bot.model.predict_proba(scaled_features)[:, 1]
 
-    # --- 4. DEBUG SCAN (Now works for ALL models) ---
-    print(f"\n--- 🧠 {model_name.upper()} BRAIN SCAN ---")
-    print(f"Max Confidence: {np.max(probs):.2%}")
-    print(f"Avg Confidence: {np.mean(probs):.2%}")
-    print(f"Trades > {BUY_THRESHOLD:.0%}:   {np.sum(probs > BUY_THRESHOLD)}")
-    print("----------------------------\n")
-
-    # 5. Simulation Loop
+    # 4. Simulation Loop
     balance = INITIAL_CAPITAL
-    btc_held = 0
     equity_curve = []
     trades = []
-    in_position = False
     
-    print("⚡ Simulating trades...")
+    # Position State
+    position = None # None, 'LONG', 'SHORT'
+    entry_price = 0
+    entry_size = 0  # In BTC
+    entry_time = None
+
+    print("⚡ Simulating Futures trades...")
     
     for i in range(len(test_df)):
-        current_price = test_df.loc[i, 'close']
+        current_close = test_df.loc[i, 'close']
+        current_high = test_df.loc[i, 'high'] # Needed for Stop Loss
+        current_low = test_df.loc[i, 'low']   # Needed for Stop Loss
         current_time = test_df.loc[i, 'timestamp']
         confidence = probs[i]
-        
-        # --- STRATEGY ---
-        # BUY Signal
-        if confidence >= BUY_THRESHOLD and not in_position:
-            amount_to_buy = (balance * 0.99) / current_price 
-            cost = amount_to_buy * current_price
-            fee = cost * TRADING_FEE
-            
-            balance -= (cost + fee)
-            btc_held = amount_to_buy
-            in_position = True
-            
-            trades.append({'type': 'BUY', 'time': current_time, 'price': current_price, 'val': balance})
 
-        # SELL Signal
-        elif confidence < SELL_THRESHOLD and in_position:
-            revenue = btc_held * current_price
-            fee = revenue * TRADING_FEE
-            
-            balance += (revenue - fee)
-            btc_held = 0
-            in_position = False
-            
-            trades.append({'type': 'SELL', 'time': current_time, 'price': current_price, 'val': balance})
-            
-        # Track Equity
-        current_equity = balance + (btc_held * current_price)
-        equity_curve.append(current_equity)
+        # --- A. CHECK STOP LOSS / TAKE PROFIT (Intra-candle) ---
+        if position == 'LONG':
+            sl_price = entry_price * (1 - STOP_LOSS_PCT)
+            if current_low <= sl_price:
+                # HIT STOP LOSS
+                exit_price = sl_price
+                pnl = (exit_price - entry_price) * entry_size
+                balance += pnl
+                trades.append({'type': 'SL_LONG', 'pnl': pnl, 'time': current_time})
+                position = None
+                
+        elif position == 'SHORT':
+            sl_price = entry_price * (1 + STOP_LOSS_PCT)
+            if current_high >= sl_price:
+                # HIT STOP LOSS
+                exit_price = sl_price
+                pnl = (entry_price - exit_price) * entry_size # Short PnL logic reversed
+                balance += pnl
+                trades.append({'type': 'SL_SHORT', 'pnl': pnl, 'time': current_time})
+                position = None
 
-    # 6. Report Results
+        # --- B. CHECK AI SIGNALS (If still in position) ---
+        if position == 'LONG':
+            if confidence < EXIT_LONG_THRESHOLD:
+                pnl = (current_close - entry_price) * entry_size
+                balance += pnl
+                trades.append({'type': 'CLOSE_LONG', 'pnl': pnl, 'time': current_time})
+                position = None
+                
+        elif position == 'SHORT':
+            if confidence > EXIT_SHORT_THRESHOLD:
+                pnl = (entry_price - current_close) * entry_size
+                balance += pnl
+                trades.append({'type': 'CLOSE_SHORT', 'pnl': pnl, 'time': current_time})
+                position = None
+
+        # --- C. ENTER NEW POSITION (If empty) ---
+        if position is None:
+            # 🛠️ TREND FILTER LOGIC
+            allow_long = trend_bias in ['NEUTRAL', 'LONG_ONLY']
+            allow_short = trend_bias in ['NEUTRAL', 'SHORT_ONLY']
+
+            # LONG SIGNAL
+            if confidence >= LONG_THRESHOLD and allow_long:
+                position = 'LONG'
+                entry_price = current_close
+                cost = balance * 0.98 # Use 98% of equity
+                entry_size = cost / entry_price
+                entry_time = current_time
+                balance -= (cost * TRADING_FEE) 
+                
+            # SHORT SIGNAL
+            elif confidence <= SHORT_THRESHOLD and allow_short:
+                position = 'SHORT'
+                entry_price = current_close
+                cost = balance * 0.98
+                entry_size = cost / entry_price
+                entry_time = current_time
+                balance -= (cost * TRADING_FEE)
+
+        # --- D. TRACK EQUITY ---
+        unrealized_pnl = 0
+        if position == 'LONG':
+            unrealized_pnl = (current_close - entry_price) * entry_size
+        elif position == 'SHORT':
+            unrealized_pnl = (entry_price - current_close) * entry_size
+            
+        equity_curve.append(balance + unrealized_pnl)
+
+    # 5. Report Results
     final_equity = equity_curve[-1]
     profit_pct = ((final_equity - INITIAL_CAPITAL) / INITIAL_CAPITAL) * 100
     
-    print(f"\n🏁 RESULTS FOR {model_name}")
-    print(f"💰 Final Equity: ${final_equity:.2f}")
+    print(f"\n🏁 RESULTS FOR {model_name} [{trend_bias}]")
+    print(f"💰 Final Equity: ${final_equity:,.2f}")
     print(f"📈 Total Return: {profit_pct:.2f}%")
     print(f"🔢 Total Trades: {len(trades)}")
     
     if len(trades) > 0:
-        wins = [t for i, t in enumerate(trades) if t['type'] == 'SELL' and t['val'] > trades[i-1]['val']]
-        win_rate = len(wins) / (len(trades)/2) if len(trades) > 0 else 0
+        wins = [t for t in trades if t['pnl'] > 0]
+        win_rate = len(wins) / len(trades)
         print(f"🏆 Win Rate:     {win_rate:.2%}")
+        
+        sl_hits = [t for t in trades if 'SL_' in t['type']]
+        print(f"🛑 Stop Losses:  {len(sl_hits)} ({len(sl_hits)/len(trades):.1%})")
 
-    # 7. Save Chart
+    # 6. Save Chart
     plt.figure(figsize=(12, 6))
-    plt.plot(test_df['timestamp'], equity_curve, label=f'{model_name} Strategy', color='blue')
-    
-    # Add Buy & Hold for comparison
-    first_price = test_df.iloc[0]['close']
-    buy_hold = [INITIAL_CAPITAL * (p / first_price) for p in test_df['close']]
-    plt.plot(test_df['timestamp'], buy_hold, label='Buy & Hold BTC', color='gray', alpha=0.5, linestyle='--')
-    
-    plt.title(f"Backtest: {model_name} (Threshold {BUY_THRESHOLD})")
+    plt.plot(test_df['timestamp'], equity_curve, label=f'{model_name} (L/S)', color='blue')
+    plt.axhline(INITIAL_CAPITAL, color='red', linestyle='--', alpha=0.5)
+    plt.title(f"Futures Backtest: {model_name} [{trend_bias}]")
     plt.ylabel("Equity ($)")
     plt.legend()
     plt.grid(True, alpha=0.3)
     
-    output_file = f"backtest_{model_name}.png"
+    output_file = f"assets/backtest_futures_{model_name}_{trend_bias}.png"
     plt.savefig(output_file)
     print(f"🖼️  Chart saved to {output_file}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Backtest a specific AI model.')
-    parser.add_argument('--model', type=str, default='model_btc_lstm', 
-                        help='Name of the model (e.g., model_xgb, model_btc_lstm)')
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--model', type=str, default='model_lstm_1h')
+    # 🆕 NEW ARGUMENT
+    parser.add_argument('--trend', type=str, default='NEUTRAL', 
+                        choices=['NEUTRAL', 'LONG_ONLY', 'SHORT_ONLY'],
+                        help='Restrict trades to a specific direction')
     
     args = parser.parse_args()
-    
-    run_backtest(args.model)
+    run_backtest(args.model, args.trend)
