@@ -1,0 +1,23 @@
+# Configuration for the Algorithmic Trading Bot
+
+backtest:
+  # Initial capital for the simulation
+  initial_capital: 10000
+
+  # Per-trade costs to simulate real market conditions
+  # Taker fee is for market orders that take liquidity
+  taker_fee: 0.0005 # 0.05%
+  
+  # Slippage simulates the price difference between when a market order is
+  # placed and when it's filled. 0.0005 means a 0.05% price impact.
+  slippage_pct: 0.0005 # 0.05%
+
+  # --- Strategy Parameters ---
+  # Hard stop-loss percentage
+  stop_loss_pct: 0.02 # 2%
+
+  # --- AI Model Thresholds ---
+  long_threshold: 0.60
+  short_threshold: 0.40
+  exit_long_threshold: 0.50
+  exit_short_threshold: 0.50
